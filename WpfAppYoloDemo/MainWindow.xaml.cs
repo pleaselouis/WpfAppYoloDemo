@@ -39,6 +39,14 @@ namespace WpfAppYoloDemo
             host = new VisualHost();
             MyCanvas.Children.Add(host);
             session = new InferenceSession("./yolov8n.onnx");
+
+            image.SizeChanged += (s, e) =>
+            {
+                if (outputList != null && outputList.Count > 0)
+                {
+                    DrawYoloBoxes();
+                }
+            };
         }
 
         private void BrowserImageClick(object sender, RoutedEventArgs e)
@@ -165,7 +173,7 @@ namespace WpfAppYoloDemo
         {
             if (image.Source == null || outputList == null || !image.IsLoaded) return;
 
-            //host.ClearVisuals();
+            host.ClearVisuals();
             var bitmap = (BitmapSource)image.Source;
 
             System.Windows.Point imgPos = image.TranslatePoint(new System.Windows.Point(0, 0), MyCanvas);

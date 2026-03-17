@@ -88,6 +88,18 @@ public class VisualHost : FrameworkElement
             this.RemoveLogicalChild(visual);
         }
     }
+    public void ClearVisuals()
+    {
+        foreach (var visual in visuals)
+        {
+            this.RemoveVisualChild(visual);
+            this.RemoveLogicalChild(visual);
+        }
+        visuals.Clear();
+
+        // 通知 WPF 重新繪製介面
+        this.InvalidateVisual();
+    }
 
     protected override int VisualChildrenCount => visuals.Count;
     protected override Visual GetVisualChild(int index) => visuals[index];
