@@ -1,13 +1,15 @@
 ﻿using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
-using OpenCvSharp;
+using OpenCvSharp; // OpenCV 核心
+using OpenCvSharp.Dnn; // 必須引用這個才能用 NMSBoxes
 using OpenCvSharp.WpfExtensions;
 using Microsoft.Win32;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
-using System.Windows.Controls;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 
 namespace WpfAppYoloDemo
 {
@@ -15,14 +17,18 @@ namespace WpfAppYoloDemo
     {
         private VisualHost host;
         private InferenceSession session;
-        private List<YoloBoxNormalized> outputList;
+        private List<YoloBox> outputList = new List<YoloBox>();
 
-        public class YoloBoxNormalized
+        private float _ratio = 1.0f;
+        private int _padX = 0;
+        private int _padY = 0;
+
+        public class YoloBox
         {
-            public float X { get; set; }        // 左上角 x, 0~1
-            public float Y { get; set; }        // 左上角 y, 0~1
-            public float W { get; set; }        // 寬度, 0~1
-            public float H { get; set; }        // 高度, 0~1
+            public float X { get; set; }
+            public float Y { get; set; }
+            public float W { get; set; }
+            public float H { get; set; }
             public float Confidence { get; set; }
             public int ClassId { get; set; }
         }
@@ -30,152 +36,156 @@ namespace WpfAppYoloDemo
         public MainWindow()
         {
             InitializeComponent();
-
             host = new VisualHost();
-            Canvas.SetLeft(host, 0);
-            Canvas.SetTop(host, 0);
             MyCanvas.Children.Add(host);
-
-            outputList = new List<YoloBoxNormalized>();
-
-            // 初始化 ONNX 推論器
             session = new InferenceSession("./yolov8n.onnx");
-
-            // 綁定 SizeChanged，隨 Image 尺寸改變自動重畫
-            image.SizeChanged += (s, e) =>
-            {
-                if (outputList != null && outputList.Count > 0)
-                    DrawYoloBoxes();
-            };
         }
 
         private void BrowserImageClick(object sender, RoutedEventArgs e)
         {
-            OpenFileDialog dialog = new OpenFileDialog
-            {
-                Title = "選擇圖片",
-                Filter = "Image Files|*.png;*.jpg;*.jpeg;*.bmp;*.gif"
-            };
-
+            OpenFileDialog dialog = new OpenFileDialog { Filter = "Image Files|*.png;*.jpg;*.jpeg;*.bmp" };
             if (dialog.ShowDialog() == true)
             {
-                BitmapImage bitmap = new BitmapImage();
-                bitmap.BeginInit();
-                bitmap.UriSource = new System.Uri(dialog.FileName);
-                bitmap.CacheOption = BitmapCacheOption.OnLoad;
-                bitmap.EndInit();
-
+                BitmapImage bitmap = new BitmapImage(new Uri(dialog.FileName));
                 image.Source = bitmap;
-
                 RunYolo(dialog.FileName);
-
-                // 立即呼叫 DrawYoloBoxes，SizeChanged 也會再次更新
-                DrawYoloBoxes();
+                Dispatcher.BeginInvoke(new Action(() => { DrawYoloBoxes(); }), DispatcherPriority.Render);
             }
         }
 
         private void RunYolo(string imgFilePath)
         {
-            var img = Cv2.ImRead(imgFilePath);
+            using var img = Cv2.ImRead(imgFilePath);
+            int targetSize = 640;
 
-            int targetSize = 640; // YOLOv8 標準輸入大小
-            Mat resized = new Mat();
-            Cv2.Resize(img, resized, new OpenCvSharp.Size(targetSize, targetSize));
+            using var processedImg = PrepareLetterbox(img, new OpenCvSharp.Size(targetSize, targetSize));
 
-            // Mat 轉 float array 並正規化
             var input = new float[1 * 3 * targetSize * targetSize];
-            for (int c = 0; c < 3; c++)
-                for (int y = 0; y < targetSize; y++)
-                    for (int x = 0; x < targetSize; x++)
-                        input[c * targetSize * targetSize + y * targetSize + x] = resized.At<Vec3b>(y, x)[c] / 255.0f;
+            for (int y = 0; y < targetSize; y++)
+            {
+                for (int x = 0; x < targetSize; x++)
+                {
+                    var pixel = processedImg.At<Vec3b>(y, x);
+                    input[0 * 640 * 640 + y * 640 + x] = pixel[2] / 255.0f;
+                    input[1 * 640 * 640 + y * 640 + x] = pixel[1] / 255.0f;
+                    input[2 * 640 * 640 + y * 640 + x] = pixel[0] / 255.0f;
+                }
+            }
 
             var tensor = new DenseTensor<float>(input, new int[] { 1, 3, targetSize, targetSize });
             var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("images", tensor) };
 
             using var results = session.Run(inputs);
-
             var resultTensor = results.First().AsTensor<float>();
-            outputList.Clear();
-            outputList = ParseYoloOutputNormalized(resultTensor, targetSize);
+
+            outputList = ParseOutput(resultTensor, targetSize);
         }
 
-        public List<YoloBoxNormalized> ParseYoloOutputNormalized(Tensor<float> resultTensor, int targetSize, float confThreshold = 0.25f)
+        private Mat PrepareLetterbox(Mat src, OpenCvSharp.Size targetSize)
+        {
+            float w = src.Width;
+            float h = src.Height;
+            _ratio = Math.Min((float)targetSize.Width / w, (float)targetSize.Height / h);
+
+            int newW = (int)Math.Round(w * _ratio);
+            int newH = (int)Math.Round(h * _ratio);
+            _padX = (targetSize.Width - newW) / 2;
+            _padY = (targetSize.Height - newH) / 2;
+
+            Mat resized = new Mat();
+            Cv2.Resize(src, resized, new OpenCvSharp.Size(newW, newH));
+
+            Mat dst = new Mat(targetSize, src.Type(), new Scalar(114, 114, 114));
+
+            // 修正：明確指定使用 OpenCvSharp.Rect 避免與 WPF 衝突
+            OpenCvSharp.Rect roi = new OpenCvSharp.Rect(_padX, _padY, newW, newH);
+
+            using (Mat mask = new Mat(dst, roi))
+            {
+                resized.CopyTo(mask);
+            }
+            return dst;
+        }
+
+        private List<YoloBox> ParseOutput(Tensor<float> result, int targetSize)
         {
             int numClasses = 80;
-            var boxes = new List<YoloBoxNormalized>();
-            int numBoxes = resultTensor.Dimensions[1];
+            int numBoxes = result.Dimensions[2];
+            var candidateBoxes = new List<Rect2d>();
+            var confidences = new List<float>();
+            var classIds = new List<int>();
 
             for (int i = 0; i < numBoxes; i++)
             {
-                float x = resultTensor[0, i, 0];
-                float y = resultTensor[0, i, 1];
-                float w = resultTensor[0, i, 2];
-                float h = resultTensor[0, i, 3];
-                float conf = resultTensor[0, i, 4];
-
-                // 找到 class probability 最大值
                 float maxProb = 0;
                 int classId = -1;
                 for (int c = 0; c < numClasses; c++)
                 {
-                    float prob = resultTensor[0, i, 5 + c];
-                    if (prob > maxProb)
-                    {
-                        maxProb = prob;
-                        classId = c;
-                    }
+                    float prob = result[0, 4 + c, i];
+                    if (prob > maxProb) { maxProb = prob; classId = c; }
                 }
 
-                float finalConf = conf * maxProb;
-                if (finalConf > confThreshold)
+                if (maxProb > 0.45f)
                 {
-                    boxes.Add(new YoloBoxNormalized
-                    {
-                        X = (x - w / 2) / targetSize,
-                        Y = (y - h / 2) / targetSize,
-                        W = w / targetSize,
-                        H = h / targetSize,
-                        Confidence = finalConf,
-                        ClassId = classId
-                    });
+                    float cx = result[0, 0, i];
+                    float cy = result[0, 1, i];
+                    float w = result[0, 2, i];
+                    float h = result[0, 3, i];
+
+                    candidateBoxes.Add(new Rect2d(cx - w / 2, cy - h / 2, w, h));
+                    confidences.Add(maxProb);
+                    classIds.Add(classId);
                 }
             }
 
-            return boxes;
+            // 修正：Cv2.Dnn 改為 CvDnn.NMSBoxes
+            CvDnn.NMSBoxes(candidateBoxes, confidences, 0.45f, 0.5f, out int[] indices);
+
+            var finalResults = new List<YoloBox>();
+            float usableW = targetSize - 2 * _padX;
+            float usableH = targetSize - 2 * _padY;
+
+            foreach (var idx in indices)
+            {
+                var rect = candidateBoxes[idx];
+                finalResults.Add(new YoloBox
+                {
+                    X = (float)((rect.X - _padX) / usableW),
+                    Y = (float)((rect.Y - _padY) / usableH),
+                    W = (float)(rect.Width / usableW),
+                    H = (float)(rect.Height / usableH),
+                    Confidence = confidences[idx],
+                    ClassId = classIds[idx]
+                });
+            }
+            return finalResults;
         }
 
         private void DrawYoloBoxes()
         {
-            if (image.Source == null || outputList == null) return;
+            if (image.Source == null || outputList == null || !image.IsLoaded) return;
 
             //host.ClearVisuals();
+            var bitmap = (BitmapSource)image.Source;
 
-            var bitmap = image.Source as BitmapSource;
-            if (bitmap == null) return;
+            System.Windows.Point imgPos = image.TranslatePoint(new System.Windows.Point(0, 0), MyCanvas);
 
-            double imgW = bitmap.PixelWidth;
-            double imgH = bitmap.PixelHeight;
+            double scale = Math.Min(image.ActualWidth / bitmap.PixelWidth, image.ActualHeight / bitmap.PixelHeight);
+            double displayW = bitmap.PixelWidth * scale;
+            double displayH = bitmap.PixelHeight * scale;
 
-            // 使用 RenderSize，避免 ActualWidth=0
-            double containerW = image.RenderSize.Width;
-            double containerH = image.RenderSize.Height;
-
-            // Uniform 縮放比例
-            double scale = System.Math.Min(containerW / imgW, containerH / imgH);
-
-            // 計算留黑邊偏移
-            double offsetX = (containerW - imgW * scale) / 2;
-            double offsetY = (containerH - imgH * scale) / 2;
+            double baseX = imgPos.X + (image.ActualWidth - displayW) / 2;
+            double baseY = imgPos.Y + (image.ActualHeight - displayH) / 2;
 
             foreach (var box in outputList)
             {
-                double x = box.X * imgW * scale + offsetX;
-                double y = box.Y * imgH * scale + offsetY;
-                double w = box.W * imgW * scale;
-                double h = box.H * imgH * scale;
+                double x = baseX + (box.X * displayW);
+                double y = baseY + (box.Y * displayH);
+                double w = box.W * displayW;
+                double h = box.H * displayH;
 
-                string text = $"Class:{box.ClassId} Conf:{box.Confidence:F2}";
-                host.AddRectangleWithText(new System.Windows.Rect(x, y, w, h), text);
+                // 這裡使用 WPF 的 Rect，不需要 OpenCvSharp 前綴
+                host.AddRectangleWithText(new System.Windows.Rect(x, y, w, h), $"ID:{box.ClassId} {box.Confidence:P0}");
             }
         }
     }
