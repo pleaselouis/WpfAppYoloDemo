@@ -7,6 +7,13 @@
         mc:Ignorable="d"
         Title="MainWindow" Height="450" Width="800">
     <Grid>
+        <TextBlock HorizontalAlignment="Left" Height="35" Margin="50,35,0,0" TextWrapping="Wrap" VerticalAlignment="Top" Width="105"><Run Language="zh-tw" Text="Browser Image "/><Run Language="zh-tw" Text=":"/></TextBlock>
+        <Button Content="Browser" HorizontalAlignment="Left" Height="26" Margin="160,30,0,0" VerticalAlignment="Top" Width="73" Click="BrowserImageClick"/>
+
+        <Grid Margin="50,75,50,20">
+            <Image x:Name="image" Stretch="Uniform"/>
+            <Canvas x:Name="MyCanvas" Background="Transparent"/>
+        </Grid>
 
     </Grid>
 </Window>
